@@ -123,6 +123,7 @@
 const API_URL = 'https://script.google.com/macros/s/AKfycbygW8hqwpECjpxXqD-TxS9E6jHz98dG1FV4f8AGg_oys0GtUxEFLabFHiDPaX5lYikIeQ/exec';
 
 const KEY_STORAGE = 'ballpass_key';
+const WHO_STORAGE = 'ballpass_who';
 const TOKEN_RE = /^BP-[0-9a-f]{32}$/;
 const REQUEST_TIMEOUT_MS = 15000;
 const SAME_CODE_IGNORE_MS = 5000;
@@ -144,7 +145,7 @@ const VIEWS = {
 };
 
 const state = {
-  key: null, me: '', tab: 'scan', busy: false,
+  key: null, me: '', who: '', tab: 'scan', busy: false,
   lastCode: '', lastCodeAt: 0, scanner: null, cameraOn: false,
   uncertainAdmit: '', stats: null, wakeLock: null,
 };
@@ -173,7 +174,7 @@ async function api(action, payload) {
     const res = await fetch(API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // simple request: no CORS preflight
-      body: JSON.stringify(Object.assign({ action: action, key: state.key }, payload || {})),
+      body: JSON.stringify(Object.assign({ action: action, key: state.key, who: state.who }, payload || {})),
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -207,7 +208,7 @@ async function ping() {
     if (r.status === 'DENIED') return showDenied(r.message);
     if (r.status === 'OK') {
       state.me = r.organizer || '';
-      $('who').textContent = (r.event ? r.event + ' · ' : '') + state.me;
+      $('who').textContent = (state.who ? state.who + ' · ' : '') + state.me;
       setStats(r.stats);
     }
     return r;
@@ -328,9 +329,12 @@ async function runAdmit(ref) {
   }
   if (r.status === 'DENIED') return showDenied(r.message);
 
-  // Retry after a lost response: the server already admitted it — by us.
-  const admittedByMeEarlier = r.status === 'USED' && state.uncertainAdmit === refKey &&
-    state.me && String(r.admittedBy || '').indexOf(state.me) === 0;
+  // Retry after a lost response: the server already admitted it — by this volunteer.
+  // Compared by the volunteer's own name, because a shared link has the same organizer name on every phone.
+  const myLabel = (state.who ? state.who + ' · ' : '') + state.me;
+  const admittedBy = String(r.admittedBy || '');
+  const admittedByMeEarlier = r.status === 'USED' && state.uncertainAdmit === refKey && state.who && state.me &&
+    (admittedBy === myLabel || admittedBy === myLabel + ' (вручную)');
   if (r.status === 'ADMITTED' || admittedByMeEarlier) {
     state.uncertainAdmit = '';
     if (state.stats && r.status === 'ADMITTED') setStats({ admitted: state.stats.admitted + 1, approved: state.stats.approved });
@@ -447,10 +451,32 @@ function stopCamera() {
 
 function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
+/** Asks the volunteer's name once per phone (shown in "Admitted By"). */
+function askName() {
+  return new Promise(resolve => {
+    showLogin('<b>Как вас зовут?</b><br>Имя будет записано рядом с каждым входом, который вы отметите.' +
+      '<form id="nameForm" class="search" style="margin-top:12px" autocomplete="off">' +
+      '<input id="nameInput" maxlength="30" placeholder="Например: Айдана" enterkeyhint="done">' +
+      '<button class="btn primary" type="submit">Готово</button></form>');
+    const input = $('nameInput');
+    setTimeout(() => input.focus(), 50);
+    $('nameForm').addEventListener('submit', e => {
+      e.preventDefault();
+      const name = input.value.replace(/\s+/g, ' ').trim().slice(0, 30);
+      if (name.length < 2) { input.focus(); return; }
+      store(WHO_STORAGE, name);
+      $('viewLogin').hidden = true;
+      resolve(name);
+    });
+  });
+}
+
 function logout() {
-  if (!confirm('Выйти? Чтобы снова войти, понадобится ваша личная ссылка.')) return;
+  if (!confirm('Выйти? Чтобы снова войти, понадобится ссылка BallPass.')) return;
   store(KEY_STORAGE, null);
+  store(WHO_STORAGE, null);
   state.key = null;
+  state.who = '';
   stopCamera();
   showLogin('Вы вышли. Откройте свою личную ссылку BallPass, чтобы войти снова.');
 }
@@ -467,6 +493,7 @@ async function init() {
       'Её нельзя пересылать другим.');
     return;
   }
+  state.who = load(WHO_STORAGE) || await askName();
   $('who').textContent = 'Подключение…';
   const r = await ping();
   if (r && r.status === 'DENIED') return;
